@@ -1,0 +1,95 @@
+# Valašský PG index
+
+Malý GitHub-ready projekt pro ranní paraglidingový report pro Valašsko.
+
+Cíl první verze:
+
+- stáhnout předpověď počasí,
+- spočítat orientační PG index,
+- uložit denní JSON,
+- vygenerovat čitelný Markdown report,
+- další den porovnat uloženou předpověď s reálnými/historickými daty.
+
+První funkční datový zdroj je Open-Meteo, protože je bez API klíče a má strojové JSON API.
+Flymet je připravený jako budoucí adaptér, ale není zapnutý automaticky.
+
+## Co projekt počítá
+
+Denní výstup obsahuje:
+
+- globální směr větru,
+- průměrný vítr a nárazy v m/s,
+- stabilitu větru 1–5,
+- skóre pro směrové sektory,
+- termický potenciál,
+- orientační dostupový potenciál,
+- srážky / bouřkovou poznámku,
+- celkové skóre VLI 0–100,
+- slovní verdikt.
+
+Příklad směrového výstupu:
+
+```text
+J starty: 78/100 — 175° — 3.1/5.8 m/s — stabilita 3/5
+JV starty: 64/100 — 175° — 3.1/5.8 m/s — stabilita 3/5
+S starty: 12/100 — mimo hlavní směr
+```
+
+## Instalace
+
+```bash
+python -m venv .venv
+source .venv/bin/activate  # Windows: .venv\Scripts\activate
+pip install -r requirements.txt
+```
+
+## Ranní report
+
+```bash
+python scripts/run_daily_forecast.py --config config/locations.json
+```
+
+Výstupy se uloží do:
+
+```text
+data/forecasts/YYYY-MM-DD_valassko-vsetin.json
+data/forecasts/YYYY-MM-DD_valassko-vsetin.md
+```
+
+## Validace včerejška
+
+```bash
+python scripts/validate_yesterday.py --config config/locations.json
+```
+
+Výstupy se uloží do:
+
+```text
+data/validation/YYYY-MM-DD_valassko-vsetin_validation.json
+data/validation/YYYY-MM-DD_valassko-vsetin_validation.md
+```
+
+## GitHub Actions
+
+Workflow `.github/workflows/daily-forecast.yml` spustí:
+
+1. ranní report,
+2. validaci včerejška,
+3. commitne nové soubory do repozitáře.
+
+Poznámka: GitHub cron běží v UTC. V létě je `05:30 UTC` přibližně `07:30` v ČR.
+
+## Důležitá omezení
+
+Toto není bezpečnostní rozhodovací systém. Je to lokální meteorologický index pro třídění dnů.
+
+Bouřky se v této verzi neberou jako automatický stop. Jsou samostatná poznámka/riziko.
+
+## Další plán
+
+- přidat ruční/automatický Flymet provider,
+- přidat ALADIN / ČHMÚ data, pokud bude vhodný formát,
+- validovat proti vlastním letům a IGC,
+- přidat XContest/IGC import,
+- upravit váhy podle reality,
+- generovat jednoduchou HTML stránku přes GitHub Pages.
