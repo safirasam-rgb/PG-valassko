@@ -1,46 +1,30 @@
 from __future__ import annotations
+from dataclasses import dataclass
+from datetime import date
+from typing import Any
+import requests
+FORECAST_URL='https://api.open-meteo.com/v1/forecast'
+HISTORICAL_URL='https://archive-api.open-meteo.com/v1/archive'
+HOURLY_BASE=['temperature_2m','relative_humidity_2m','dew_point_2m','apparent_temperature','precipitation_probability','precipitation','rain','showers','weather_code','cloud_cover','cloud_cover_low','cloud_cover_mid','cloud_cover_high','visibility','wind_speed_10m','wind_direction_10m','wind_gusts_10m','shortwave_radiation']
+PRESSURE_LEVELS=['wind_speed_850hPa','wind_direction_850hPa','temperature_850hPa','geopotential_height_850hPa','wind_speed_700hPa','wind_direction_700hPa','temperature_700hPa','geopotential_height_700hPa']
+@dataclass(frozen=True)
+class OpenMeteoRequest:
+    latitude:float; longitude:float; timezone:str='Europe/Prague'; include_pressure_levels:bool=False
 
-import math
-from statistics import mean
+def _get(url:str, params:dict[str,Any])->dict[str,Any]:
+    r=requests.get(url, params=params, timeout=30); r.raise_for_status(); return r.json()
 
+def fetch_forecast(req:OpenMeteoRequest, forecast_days:int=3)->dict[str,Any]:
+    hourly=list(HOURLY_BASE)+(PRESSURE_LEVELS if req.include_pressure_levels else [])
+    params={'latitude':req.latitude,'longitude':req.longitude,'timezone':req.timezone,'forecast_days':forecast_days,'hourly':','.join(hourly),'wind_speed_unit':'ms','precipitation_unit':'mm','timeformat':'iso8601'}
+    warnings=[]
+    try: data=_get(FORECAST_URL, params)
+    except Exception:
+        warnings.append('pressure_level_variables_failed_or_unavailable')
+        params['hourly']=','.join(HOURLY_BASE); data=_get(FORECAST_URL, params)
+    data['_meta']={'provider':'open-meteo','warnings':warnings,'requested_pressure_levels':req.include_pressure_levels}
+    return data
 
-def clamp(value: float, low: float = 0.0, high: float = 100.0) -> float:
-    return max(low, min(high, value))
-
-
-def angular_distance_deg(a: float, b: float) -> float:
-    """Smallest distance between two bearings in degrees."""
-    return abs((a - b + 180) % 360 - 180)
-
-
-def circular_mean_deg(values: list[float]) -> float | None:
-    """Vector average for wind directions.
-
-    Wind direction is kept as meteorological direction: degrees FROM which it blows.
-    """
-    vals = [v for v in values if v is not None]
-    if not vals:
-        return None
-
-    sin_sum = sum(math.sin(math.radians(v)) for v in vals)
-    cos_sum = sum(math.cos(math.radians(v)) for v in vals)
-
-    if abs(sin_sum) < 1e-9 and abs(cos_sum) < 1e-9:
-        return None
-
-    return (math.degrees(math.atan2(sin_sum, cos_sum)) + 360) % 360
-
-
-def safe_mean(values: list[float | None]) -> float | None:
-    vals = [v for v in values if v is not None]
-    return mean(vals) if vals else None
-
-
-def safe_max(values: list[float | None]) -> float | None:
-    vals = [v for v in values if v is not None]
-    return max(vals) if vals else None
-
-
-def safe_sum(values: list[float | None]) -> float:
-    vals = [v for v in values if v is not None]
-    return sum(vals) if vals else 0.0
+def fetch_historical_actual(req:OpenMeteoRequest, target_date:date)->dict[str,Any]:
+    params={'latitude':req.latitude,'longitude':req.longitude,'timezone':req.timezone,'start_date':target_date.isoformat(),'end_date':target_date.isoformat(),'hourly':','.join(HOURLY_BASE),'wind_speed_unit':'ms','precipitation_unit':'mm','timeformat':'iso8601'}
+    data=_get(HISTORICAL_URL, params); data['_meta']={'provider':'open-meteo-historical'}; return data

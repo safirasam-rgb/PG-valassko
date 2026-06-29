@@ -1,20 +1,85 @@
 from __future__ import annotations
+from dataclasses import dataclass
+from datetime import datetime, date
+from typing import Any
+from .config import ForecastWindow, Location, SectorSettings
+from .math_utils import angular_distance_deg,circular_mean_deg,clamp,safe_max,safe_mean,safe_sum
+SECTORS={'S':0,'SV':45,'V':90,'JV':135,'J':180,'JZ':225,'Z':270,'SZ':315}
+@dataclass(frozen=True)
+class DaySlice: times:list[str]; values:dict[str,list[Any]]
 
+def select_day_window(data:dict[str,Any], target_date:date, window:ForecastWindow)->DaySlice:
+    h=data['hourly']; idx=[]
+    for i,t in enumerate(h['time']):
+        dt=datetime.fromisoformat(t)
+        if dt.date()==target_date and window.start_hour<=dt.hour<=window.end_hour: idx.append(i)
+    return DaySlice([h['time'][i] for i in idx], {k:[s[i] for i in idx] for k,s in h.items() if k!='time'})
 
-class FlymetProvider:
-    """Placeholder for future Flymet integration.
+def wind_stability_score(mean_wind_ms, max_gust_ms)->int:
+    if mean_wind_ms is None or max_gust_ms is None: return 0
+    d=max(0,max_gust_ms-mean_wind_ms)
+    return 5 if d<=1.5 else 4 if d<=3 else 3 if d<=5 else 2 if d<=7 else 1
 
-    Flymet is valuable because it is aviation/soaring oriented. It should not be
-    scraped blindly until we confirm a stable and acceptable data route.
+def wind_strength_score(v, st:SectorSettings)->float:
+    if v is None: return 0
+    if st.ideal_wind_min_ms<=v<=st.ideal_wind_max_ms: return 100
+    if v<st.ideal_wind_min_ms: return clamp(20+80*(v/max(st.ideal_wind_min_ms,.1)))
+    span=max(st.strong_wind_ms-st.ideal_wind_max_ms,.1)
+    return clamp(100-70*((v-st.ideal_wind_max_ms)/span))
 
-    Possible future modes:
-    - manual input from Flymet map/meteogram values,
-    - parsing known image URLs and metadata,
-    - official Meteopress API if available,
-    - user-provided exported data.
-    """
+def direction_score(gdir, center, st:SectorSettings)->float:
+    if gdir is None: return 0
+    d=angular_distance_deg(gdir,center)
+    if d<=st.ideal_spread_deg: return 100
+    if d>=st.allowed_spread_deg: return 0
+    return clamp(100*(1-(d-st.ideal_spread_deg)/(st.allowed_spread_deg-st.ideal_spread_deg)))
 
-    def fetch(self) -> None:
-        raise NotImplementedError(
-            "Flymet provider is not implemented yet. Use Open-Meteo provider first."
-        )
+def sector_scores(gdir, mean_wind, stability, st):
+    strength=wind_strength_score(mean_wind,st); out=[]
+    for name,center in SECTORS.items():
+        ds=direction_score(gdir,center,st); score=.65*ds+.25*strength+.10*(stability*20)
+        out.append({'sector':name,'center_deg':center,'score':round(clamp(score),1),'direction_match':round(ds,1),'wind_strength_score':round(strength,1)})
+    return sorted(out,key=lambda x:x['score'],reverse=True)
+
+def cloud_score(c)->float:
+    if c is None: return 50
+    if 20<=c<=55: return 100
+    if c<20: return clamp(70+c*1.5)
+    return clamp(100-(c-55)*1.7)
+
+def thermal_score(day:DaySlice)->dict[str,Any]:
+    t=safe_max(day.values.get('temperature_2m',[])); r=safe_max(day.values.get('shortwave_radiation',[])); c=safe_mean(day.values.get('cloud_cover',[])); ps=safe_sum(day.values.get('precipitation',[])); pp=safe_max(day.values.get('precipitation_probability',[]))
+    tp=0 if t is None else clamp((t-12)/20*100); rp=50 if r is None else clamp(r/700*100); cp=cloud_score(c)
+    score=.35*tp+.35*rp+.30*cp-min(35,ps*18)-(0 if pp is None else max(0,pp-35)*.35)
+    return {'score':round(clamp(score),1),'max_temp_c':round(t,1) if t is not None else None,'max_shortwave_wm2':round(r,1) if r is not None else None,'mean_cloud_cover_pct':round(c,1) if c is not None else None,'precip_sum_mm':round(ps,2),'precip_probability_max_pct':round(pp,1) if pp is not None else None}
+
+def storm_note(day:DaySlice)->dict[str,Any]:
+    pp=safe_max(day.values.get('precipitation_probability',[])); sh=safe_sum(day.values.get('showers',[])); rain=safe_sum(day.values.get('rain',[]))
+    risk='nízké'
+    if (pp or 0)>=55 or sh>=1: risk='střední'
+    if (pp or 0)>=75 or sh>=3: risk='vyšší'
+    return {'risk':risk,'precip_probability_max_pct':round(pp,1) if pp is not None else None,'showers_sum_mm':round(sh,2),'rain_sum_mm':round(rain,2),'policy':'Bouřky nejsou automatický stop. Jsou samostatná riziková poznámka.'}
+
+def estimate_ceiling_potential(thermal,day):
+    low=safe_mean(day.values.get('cloud_cover_low',[])); score=thermal['score']-(20 if low is not None and low>60 else 0)
+    label='dobrý' if score>=70 else 'střední' if score>=50 else 'slabý'
+    return {'score':round(clamp(score),1),'label':label,'confidence':'nízká až střední','note':'Proxy odhad. Přesný dostup chce sounding / thermal tops / usable lift.'}
+
+def compute_index(forecast_data:dict[str,Any], location:Location, target_date:date, window:ForecastWindow, settings:SectorSettings)->dict[str,Any]:
+    day=select_day_window(forecast_data,target_date,window)
+    wind=safe_mean(day.values.get('wind_speed_10m',[])); gust=safe_max(day.values.get('wind_gusts_10m',[])); direction=circular_mean_deg(day.values.get('wind_direction_10m',[])); stab=wind_stability_score(wind,gust)
+    sectors=sector_scores(direction,wind,stab,settings); therm=thermal_score(day); storm=storm_note(day); ceiling=estimate_ceiling_potential(therm,day)
+    mean_cloud=safe_mean(day.values.get('cloud_cover',[])); precip=safe_sum(day.values.get('precipitation',[]))
+    wind_comp=.45*wind_strength_score(wind,settings)+.35*sectors[0]['direction_match']+.20*(stab*20)
+    cloud_precip=cloud_score(mean_cloud)-min(35,precip*18)
+    storm_penalty=5 if storm['risk']=='střední' else 10 if storm['risk']=='vyšší' else 0
+    vli=.30*wind_comp+.30*therm['score']+.20*ceiling['score']+.15*cloud_precip+.05*(stab*20)-storm_penalty
+    verdict=make_verdict(vli,wind,therm['score'],storm['risk'],sectors)
+    return {'schema_version':'0.2','issued_at':datetime.now().astimezone().isoformat(timespec='seconds'),'target_date':target_date.isoformat(),'location':{'id':location.id,'name':location.name,'latitude':location.latitude,'longitude':location.longitude,'elevation_m':location.elevation_m},'provider':forecast_data.get('_meta',{}),'forecast_window':{'start_hour':window.start_hour,'end_hour':window.end_hour,'sample_count':len(day.times),'times':day.times},'global':{'direction_deg':round(direction,0) if direction is not None else None,'mean_wind_ms':round(wind,1) if wind is not None else None,'max_gust_ms':round(gust,1) if gust is not None else None,'stability_1to5':stab},'sector_scores':sectors,'scores':{'vli':round(clamp(vli),1),'wind_component':round(clamp(wind_comp),1),'thermal':therm,'ceiling':ceiling,'cloud_precip_component':round(clamp(cloud_precip),1)},'risks':{'storm':storm},'verdict':verdict}
+
+def make_verdict(vli, wind, thermal, storm_risk, sectors):
+    best=sectors[0]['sector'] if sectors else '?'
+    base='Velmi dobrý letový den.' if vli>=75 else 'Letově zajímavý den.' if vli>=60 else 'Použitelný, ale selektivní den.' if vli>=45 else 'Slabý nebo problémový den.'
+    detail='Termika může fungovat, ale start bude hodně záviset na lokálním nádechu svahu.' if thermal>=70 and (wind or 0)<2.5 else 'Termický potenciál je dobrý.' if thermal>=70 else 'Termika spíš střední.' if thermal>=50 else 'Termický potenciál je slabý.'
+    storm=f' Bouřkové/přeháňkové riziko: {storm_risk}; sledovat vývoj, radar a únikové varianty.' if storm_risk in {'střední','vyšší'} else ''
+    return f'{base} Nejlepší směrový sektor: {best}. {detail}{storm}'

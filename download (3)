@@ -1,0 +1,48 @@
+from __future__ import annotations
+from datetime import date
+from .config import ForecastWindow
+from .math_utils import angular_distance_deg,circular_mean_deg,safe_max,safe_mean,safe_sum
+from .scoring import select_day_window
+
+def summarize_actual(actual_data:dict, target_date:date, window:ForecastWindow)->dict:
+    day=select_day_window(actual_data,target_date,window)
+    d=circular_mean_deg(day.values.get('wind_direction_10m',[])); wind=safe_mean(day.values.get('wind_speed_10m',[])); gust=safe_max(day.values.get('wind_gusts_10m',[])); t=safe_max(day.values.get('temperature_2m',[])); c=safe_mean(day.values.get('cloud_cover',[])); p=safe_sum(day.values.get('precipitation',[]))
+    return {'direction_deg':round(d,0) if d is not None else None,'mean_wind_ms':round(wind,1) if wind is not None else None,'max_gust_ms':round(gust,1) if gust is not None else None,'max_temp_c':round(t,1) if t is not None else None,'mean_cloud_cover_pct':round(c,1) if c is not None else None,'precip_sum_mm':round(p,2)}
+
+def compare_forecast_to_actual(forecast:dict, actual:dict)->dict:
+    fg=forecast['global']; ft=forecast['scores']['thermal']
+    def diff(a,b): return None if a is None or b is None else round(b-a,2)
+    de=None if fg['direction_deg'] is None or actual['direction_deg'] is None else round(angular_distance_deg(fg['direction_deg'],actual['direction_deg']),0)
+    return {'target_date':forecast['target_date'],'location':forecast['location'],'forecast_summary':{'vli':forecast['scores']['vli'],'direction_deg':fg['direction_deg'],'mean_wind_ms':fg['mean_wind_ms'],'max_gust_ms':fg['max_gust_ms'],'thermal_score':ft['score'],'verdict':forecast['verdict']},'actual_summary':actual,'errors':{'direction_error_deg':de,'mean_wind_error_ms_actual_minus_forecast':diff(fg['mean_wind_ms'],actual['mean_wind_ms']),'max_gust_error_ms_actual_minus_forecast':diff(fg['max_gust_ms'],actual['max_gust_ms']),'max_temp_error_c_actual_minus_forecast':diff(ft['max_temp_c'],actual['max_temp_c']),'cloud_cover_error_pct_actual_minus_forecast':diff(ft['mean_cloud_cover_pct'],actual['mean_cloud_cover_pct']),'precip_error_mm_actual_minus_forecast':diff(ft['precip_sum_mm'],actual['precip_sum_mm'])},'note':'Toto porovnává meteorologické veličiny, ne kvalitu letu. Další vrstva musí přijít z IGC/XContest/vlastních poznámek.'}
+
+def render_validation_markdown(r:dict)->str:
+    f=r['forecast_summary']; a=r['actual_summary']; e=r['errors']
+    return f"""# Validace PG indexu — {r['location']['name']} — {r['target_date']}
+
+## Ranní předpověď
+
+- VLI: **{f['vli']}/100**
+- Směr: **{f['direction_deg']}°**
+- Vítr: **{f['mean_wind_ms']}/{f['max_gust_ms']} m/s**
+- Termika: **{f['thermal_score']}/100**
+- Verdikt: {f['verdict']}
+
+## Skutečnost podle historických dat
+
+- Směr: **{a['direction_deg']}°**
+- Vítr: **{a['mean_wind_ms']}/{a['max_gust_ms']} m/s**
+- Max. teplota: **{a['max_temp_c']} °C**
+- Průměrná oblačnost: **{a['mean_cloud_cover_pct']} %**
+- Srážky: **{a['precip_sum_mm']} mm**
+
+## Chyby
+
+- Chyba směru: **{e['direction_error_deg']}°**
+- Vítr actual - forecast: **{e['mean_wind_error_ms_actual_minus_forecast']} m/s**
+- Nárazy actual - forecast: **{e['max_gust_error_ms_actual_minus_forecast']} m/s**
+- Teplota actual - forecast: **{e['max_temp_error_c_actual_minus_forecast']} °C**
+- Oblačnost actual - forecast: **{e['cloud_cover_error_pct_actual_minus_forecast']} %**
+- Srážky actual - forecast: **{e['precip_error_mm_actual_minus_forecast']} mm**
+
+{r['note']}
+"""
